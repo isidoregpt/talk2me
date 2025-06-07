@@ -429,12 +429,11 @@ def process_continuous_speech(audio_data, ai_provider, video_ctx, status_placeho
         status_placeholder.success("🎤 Listening... speak naturally!")
 
 # Manual conversation mode (original functionality)
-else:
+if not (ai_provider == "Anthropic" and 'continuous_mode' in locals() and continuous_mode):
     st.subheader("🎙️ Manual Voice Recording")
     st.info("💡 Click buttons to record and process your voice messages")
-
-# Live Recording (for manual mode or non-Anthropic)
-if not (ai_provider == "Anthropic" and 'continuous_mode' in locals() and continuous_mode):
+    
+    # Live Recording (for manual mode or non-Anthropic)
     ctx = webrtc_streamer(
         key="audio_recorder",
         mode=WebRtcMode.SENDONLY,
