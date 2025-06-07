@@ -54,11 +54,20 @@ ctx = webrtc_streamer(
 )
 
 if ctx.audio_processor and st.button("🗣️ Transcribe and Send"):
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
         tmp.write(ctx.audio_processor.get_audio_bytes())
         audio_path = tmp.name
 
     with open(audio_path, "rb") as f:
+        audio_data = f.read()
+
+    # Re-encode to supported format (MP3) if needed
+    import pydub
+    audio_segment = pydub.AudioSegment.from_raw(audio_path, sample_width=2, frame_rate=48000, channels=1)
+    converted_path = audio_path.replace(".mp3", "_converted.mp3")
+    audio_segment.export(converted_path, format="mp3")
+
+    with open(converted_path, "rb") as f:
         audio_data = f.read()
 
     # Transcribe using Whisper
@@ -68,7 +77,7 @@ if ctx.audio_processor and st.button("🗣️ Transcribe and Send"):
             "Authorization": f"Bearer {st.session_state['openai_api_key']}"
         }
         files = {
-            "file": ("audio.wav", audio_data, "audio/wav")
+            "file": ("audio.mp3", audio_data, "audio/mpeg")
         }
         data = {
             "model": "whisper-1",
