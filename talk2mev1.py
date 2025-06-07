@@ -63,11 +63,21 @@ if ctx.audio_processor and st.button("🗣️ Transcribe and Send"):
 
     # Transcribe using Whisper
     with st.spinner("🔎 Transcribing audio..."):
-        headers = {"Authorization": f"Bearer {st.session_state['openai_api_key']}"}
-        files = {"file": ("audio.wav", audio_data), "model": (None, "whisper-1")}
-        response = requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files)
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        headers = {
+            "Authorization": f"Bearer {st.session_state['openai_api_key']}"
+        }
+        files = {
+            "file": ("audio.wav", audio_data, "audio/wav")
+        }
+        data = {
+            "model": "whisper-1",
+            "response_format": "json"
+        }
+        response = requests.post(url, headers=headers, files=files, data=data)
 
-    if response.status_code != 200:
+    if not response.ok:
+        st.error(f"Transcription failed. {response.status_code}: {response.text}")
         st.error("Transcription failed.")
     else:
         transcript = response.json().get("text", "")
