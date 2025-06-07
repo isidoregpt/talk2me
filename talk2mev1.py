@@ -5,7 +5,6 @@ import tempfile
 import os
 import time
 from io import BytesIO
-from pydub import AudioSegment
 import json
 from datetime import datetime
 
