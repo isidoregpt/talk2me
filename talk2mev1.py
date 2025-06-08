@@ -13,6 +13,8 @@ import tempfile
 import asyncio
 import requests
 import numpy as np
+import threading
+from collections import deque
 
 # Page settings
 st.set_page_config(page_title="Multi-AI Voice Chat", layout="wide")
@@ -23,6 +25,10 @@ if 'conversation' not in st.session_state:
     st.session_state['conversation'] = []
 if 'selected_ai' not in st.session_state:
     st.session_state['selected_ai'] = "OpenAI"
+if 'continuous_mode' not in st.session_state:
+    st.session_state['continuous_mode'] = False
+if 'is_processing' not in st.session_state:
+    st.session_state['is_processing'] = False
 
 # AI Provider Selection
 st.header("🤖 Choose Your AI Assistant")
@@ -89,10 +95,62 @@ else:
     with col2:
         st.info("💡 Claude responses will be converted to speech using OpenAI's TTS")
         enable_webcam = st.checkbox("📹 Enable Webcam for Claude Vision", value=True)
+        continuous_mode = st.checkbox("🔄 Continuous Conversation Mode", value=False, 
+                                    help="Talk naturally without pressing buttons - like chatting with a human!")
         if enable_webcam:
             st.success("🎥 Webcam enabled - Claude can see you!")
+        if continuous_mode:
+            st.success("🗣️ Continuous mode - Just talk naturally!")
 
-# Audio and Video Processing Classes
+# Audio and Video Processing Classes with Voice Activity Detection
+class ContinuousAudioProcessor(AudioProcessorBase):
+    def __init__(self) -> None:
+        self.audio_buffer = deque(maxlen=48000 * 10)  # 10 seconds at 48kHz
+        self.speech_buffer = []
+        self.is_speaking = False
+        self.silence_counter = 0
+        self.silence_threshold = 48000 * 2  # 2 seconds of silence
+        self.volume_threshold = 0.01  # Minimum volume to consider as speech
+        self.min_speech_length = 48000 * 1  # Minimum 1 second of speech
+        
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        audio_array = frame.to_ndarray()
+        
+        # Add to circular buffer
+        for sample in audio_array.flatten():
+            self.audio_buffer.append(sample)
+        
+        # Simple voice activity detection
+        volume = np.sqrt(np.mean(audio_array**2))
+        
+        if volume > self.volume_threshold:
+            if not self.is_speaking:
+                self.is_speaking = True
+                self.speech_buffer = list(self.audio_buffer)  # Start with recent context
+            else:
+                self.speech_buffer.extend(audio_array.flatten())
+            self.silence_counter = 0
+        else:
+            if self.is_speaking:
+                self.silence_counter += len(audio_array.flatten())
+                self.speech_buffer.extend(audio_array.flatten())
+                
+                # End of speech detected
+                if self.silence_counter > self.silence_threshold:
+                    if len(self.speech_buffer) > self.min_speech_length:
+                        # Speech segment ready for processing
+                        st.session_state['pending_speech'] = np.array(self.speech_buffer)
+                    self.is_speaking = False
+                    self.speech_buffer = []
+                    self.silence_counter = 0
+        
+        return frame
+    
+    def get_audio_data(self):
+        if self.speech_buffer and len(self.speech_buffer) > self.min_speech_length:
+            return np.array(self.speech_buffer)
+        return None
+
 class AudioProcessor(AudioProcessorBase):
     def __init__(self) -> None:
         self.audio_frames = []
@@ -237,6 +295,10 @@ def get_anthropic_response_with_vision(messages, model, anthropic_key, image=Non
 # Main Voice Interface
 st.header("🎧 Voice Interaction")
 
+# Initialize session state for pending speech
+if 'pending_speech' not in st.session_state:
+    st.session_state['pending_speech'] = None
+
 # Webcam for Anthropic models
 video_ctx = None
 if ai_provider == "Anthropic" and 'enable_webcam' in locals() and enable_webcam:
@@ -246,7 +308,13 @@ if ai_provider == "Anthropic" and 'enable_webcam' in locals() and enable_webcam:
         key="video_stream",
         mode=WebRtcMode.SENDONLY,
         media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        rtc_configuration={
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+                {"urls": ["stun:stun2.l.google.com:19302"]},
+            ]
+        },
         video_processor_factory=VideoProcessor,
         async_processing=True,
     )
@@ -256,26 +324,199 @@ if ai_provider == "Anthropic" and 'enable_webcam' in locals() and enable_webcam:
     else:
         st.info("📷 Click 'START' to activate webcam for Claude vision")
 
-# Live Recording
-ctx = webrtc_streamer(
-    key="audio_recorder",
-    mode=WebRtcMode.SENDONLY,
-    audio_receiver_size=256,
-    media_stream_constraints={"audio": True, "video": False},
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    audio_processor_factory=AudioProcessor,
-    async_processing=True,
-)
-
-if ctx.audio_processor:
+# Continuous conversation mode for Anthropic
+if ai_provider == "Anthropic" and 'continuous_mode' in locals() and continuous_mode:
+    st.subheader("🔄 Continuous Conversation Mode")
+    st.info("💬 **Just start talking!** Claude will listen, see you, and respond automatically.")
+    
+    # Status indicator
+    status_placeholder = st.empty()
+    
+    if not st.session_state['is_processing']:
+        status_placeholder.success("🎤 Listening... speak naturally!")
+    else:
+        status_placeholder.warning("🤖 Processing your message...")
+    
+    # Continuous audio stream with better configuration
+    continuous_ctx = webrtc_streamer(
+        key="continuous_audio",
+        mode=WebRtcMode.SENDONLY,
+        audio_receiver_size=2048,
+        media_stream_constraints={
+            "audio": {
+                "echoCancellation": True,
+                "noiseSuppression": True,
+                "autoGainControl": True,
+                "sampleRate": 48000
+            }, 
+            "video": False
+        },
+        rtc_configuration={
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+                {"urls": ["stun:stun2.l.google.com:19302"]},
+                {"urls": ["stun:stun.cloudflare.com:3478"]},
+            ],
+            "iceCandidatePoolSize": 10,
+        },
+        audio_processor_factory=ContinuousAudioProcessor,
+        async_processing=True,
+    )
+    
+    # Check connection status
+    if continuous_ctx.state.playing:
+        st.success("🎤 Connected! Speak naturally...")
+    elif continuous_ctx.state.signalling:
+        st.info("🔄 Connecting to audio stream...")
+    else:
+        st.warning("⚠️ Audio not connected. Click 'START' above.")
+    
+    # Alternative: Manual trigger for testing
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🗣️ Process Recording", use_container_width=True):
-            process_audio_recording(ctx.audio_processor, ai_provider, video_ctx)
+        if st.button("🧪 Test Continuous Mode", use_container_width=True):
+            if continuous_ctx.audio_processor:
+                audio_data = continuous_ctx.audio_processor.get_audio_data()
+                if audio_data is not None:
+                    process_continuous_speech(audio_data, ai_provider, video_ctx, status_placeholder)
+                else:
+                    st.warning("No audio captured. Try speaking louder or longer.")
     with col2:
-        if st.button("🗑️ Clear Audio Buffer", use_container_width=True):
-            ctx.audio_processor.audio_frames = []
-            st.success("Audio buffer cleared!")
+        if st.button("🔄 Reset Connection", use_container_width=True):
+            st.rerun()
+    
+    # Process pending speech automatically (with better error handling)
+    if (st.session_state['pending_speech'] is not None and 
+        not st.session_state['is_processing'] and
+        st.session_state['openai_api_key'] and
+        st.session_state['anthropic_api_key'] and
+        continuous_ctx.state.playing):
+        
+        try:
+            st.session_state['is_processing'] = True
+            status_placeholder.warning("🤖 Processing your message...")
+            
+            # Process the speech
+            process_continuous_speech(
+                st.session_state['pending_speech'], 
+                ai_provider, 
+                video_ctx,
+                status_placeholder
+            )
+            
+        except Exception as e:
+            st.error(f"Processing error: {str(e)}")
+        finally:
+            # Clear the pending speech and reset
+            st.session_state['pending_speech'] = None
+            st.session_state['is_processing'] = False
+            status_placeholder.success("🎤 Ready for next message...")
+            time.sleep(1)  # Brief pause before refreshing
+            st.rerun()
+
+def process_continuous_speech(audio_data, ai_provider, video_ctx, status_placeholder):
+    """Process speech in continuous mode"""
+    try:
+        status_placeholder.info("🔎 Transcribing your speech...")
+        
+        # Save and transcribe audio
+        audio_path = save_audio_as_wav(audio_data)
+        
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+        
+        transcript = transcribe_audio(audio_bytes, st.session_state['openai_api_key'])
+        
+        if not transcript.strip():
+            status_placeholder.success("🎤 Listening... speak naturally!")
+            return
+            
+        # Show what was heard
+        st.success(f"👂 Heard: {transcript}")
+        st.session_state['conversation'].append({"role": "user", "content": transcript})
+        
+        # Get webcam image
+        current_image = None
+        if video_ctx and video_ctx.video_processor:
+            current_image = video_ctx.video_processor.get_latest_image()
+        
+        status_placeholder.info("🧠 Claude is thinking...")
+        
+        # Get Claude response
+        messages = st.session_state['conversation'].copy()
+        response_text = get_anthropic_response_with_vision(
+            messages, 
+            claude_model, 
+            st.session_state['anthropic_api_key'],
+            current_image
+        )
+        
+        status_placeholder.info("🎵 Generating speech response...")
+        
+        # Generate and play audio response
+        audio_file = generate_tts(
+            response_text, 
+            voice, 
+            st.session_state['openai_api_key']
+        )
+        
+        # Display response
+        st.markdown(f"**🤖 Claude:** {response_text}")
+        st.audio(audio_file, format="audio/mp3")
+        
+        st.session_state['conversation'].append({"role": "assistant", "content": response_text})
+        
+        # Cleanup
+        os.unlink(audio_path)
+        os.unlink(audio_file)
+        
+        status_placeholder.success("🎤 Listening... speak naturally!")
+        
+    except Exception as e:
+        st.error(f"Error in continuous mode: {str(e)}")
+        status_placeholder.success("🎤 Listening... speak naturally!")
+
+# Manual conversation mode (original functionality)
+if not (ai_provider == "Anthropic" and 'continuous_mode' in locals() and continuous_mode):
+    st.subheader("🎙️ Manual Voice Recording")
+    st.info("💡 Click buttons to record and process your voice messages")
+    
+    # Live Recording (for manual mode or non-Anthropic)
+    ctx = webrtc_streamer(
+        key="audio_recorder",
+        mode=WebRtcMode.SENDONLY,
+        audio_receiver_size=1024,
+        media_stream_constraints={
+            "audio": {
+                "echoCancellation": True,
+                "noiseSuppression": True,
+                "autoGainControl": True
+            }, 
+            "video": False
+        },
+        rtc_configuration={
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+                {"urls": ["stun:stun2.l.google.com:19302"]},
+                {"urls": ["stun:stun.cloudflare.com:3478"]},
+            ],
+            "iceCandidatePoolSize": 10,
+        },
+        audio_processor_factory=AudioProcessor,
+        async_processing=True,
+    )
+
+    if ctx.audio_processor:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗣️ Process Recording", use_container_width=True):
+                process_audio_recording(ctx.audio_processor, ai_provider, video_ctx)
+        with col2:
+            if st.button("🗑️ Clear Audio Buffer", use_container_width=True):
+                ctx.audio_processor.audio_frames = []
+                st.success("Audio buffer cleared!")
 
 def process_audio_recording(audio_processor, ai_provider, video_ctx=None):
     """Process recorded audio with optional video"""
@@ -359,7 +600,7 @@ def process_audio_recording(audio_processor, ai_provider, video_ctx=None):
     except Exception as e:
         st.error(f"Error processing audio: {str(e)}")
 
-# File Upload Alternative
+# File Upload Alternative (always available)
 st.header("📁 Upload Audio File")
 uploaded_file = st.file_uploader(
     "Choose an audio file", 
@@ -442,7 +683,7 @@ def process_uploaded_file(uploaded_file, ai_provider, video_ctx=None):
     except Exception as e:
         st.error(f"Error processing uploaded file: {str(e)}")
 
-# Text Input Alternative
+# Text Input Alternative (always available)
 st.header("⌨️ Text Input")
 text_input = st.text_area(
     "Type your message:",
@@ -569,11 +810,18 @@ st.sidebar.markdown("""
 3. **Select Model & Voice** settings
 4. **Start Chatting** via voice, file, or text
 
-### 🎙️ Voice Options
-- **Live Recording**: Click record, speak, then process
-- **File Upload**: Upload audio files (WAV, MP3, etc.)
-- **Text Input**: Type messages for text-only chat
+### 🎙️ Conversation Modes
+- **🔄 Continuous Mode**: Natural conversation with Claude (Anthropic only)
+- **🎙️ Manual Recording**: Click to record and process (All models)
+- **📁 File Upload**: Upload audio files (WAV, MP3, etc.)
+- **⌨️ Text Input**: Type messages for text-only chat
 - **📹 Webcam Vision**: Enable camera for Claude to see you
+
+### 🤖 Natural Conversation Features
+- **Voice Activity Detection**: Automatically detects when you start/stop talking
+- **Seamless Flow**: No button pressing - just talk like with a human
+- **Visual Context**: Claude sees you through webcam while you talk
+- **Instant Responses**: Automatic transcription and audio replies
 
 ### 🤖 AI Models
 - **OpenAI**: GPT-4o, GPT-4-turbo, GPT-3.5-turbo
@@ -587,10 +835,34 @@ st.sidebar.markdown("""
 
 st.sidebar.header("🔧 Troubleshooting")
 st.sidebar.markdown("""
-- **No audio detected**: Check microphone permissions
+- **Connection issues**: Try refreshing the page
+- **"Taking longer than expected"**: 
+  - Check microphone permissions in browser
+  - Try using Chrome or Edge browser
+  - Disable VPN if using one
+- **No audio detected**: Check microphone permissions and speak louder
 - **API errors**: Verify your API keys are correct
-- **Recording issues**: Try file upload instead
+- **Continuous mode not working**: Try manual test button first
 - **Browser compatibility**: Use Chrome/Edge for best results
+""")
+
+st.sidebar.header("🌐 Connection Tips")
+st.sidebar.markdown("""
+- **Microphone Access**: Allow microphone permissions when prompted
+- **Browser Support**: Chrome and Edge work best
+- **Network**: Stable internet connection required
+- **Firewall**: Some corporate firewalls block WebRTC
+- **VPN**: May interfere with audio streaming
+- **HTTPS**: Ensure you're using HTTPS (not HTTP)
+""")
+
+st.sidebar.header("🎙️ Audio Quality Tips")
+st.sidebar.markdown("""
+- **Speak clearly** and at normal volume
+- **Minimize background noise**
+- **Wait for processing** to complete before speaking again
+- **Check microphone** is working in other apps first
+- **Use headphones** to avoid echo/feedback
 """)
 
 st.sidebar.header("🔒 Privacy & Security")
