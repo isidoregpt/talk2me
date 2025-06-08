@@ -308,13 +308,7 @@ if ai_provider == "Anthropic" and 'enable_webcam' in locals() and enable_webcam:
         key="video_stream",
         mode=WebRtcMode.SENDONLY,
         media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]},
-            ]
-        },
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         video_processor_factory=VideoProcessor,
         async_processing=True,
     )
@@ -337,83 +331,40 @@ if ai_provider == "Anthropic" and 'continuous_mode' in locals() and continuous_m
     else:
         status_placeholder.warning("🤖 Processing your message...")
     
-    # Continuous audio stream with better configuration
+    # Continuous audio stream
     continuous_ctx = webrtc_streamer(
         key="continuous_audio",
         mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=2048,
-        media_stream_constraints={
-            "audio": {
-                "echoCancellation": True,
-                "noiseSuppression": True,
-                "autoGainControl": True,
-                "sampleRate": 48000
-            }, 
-            "video": False
-        },
-        rtc_configuration={
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]},
-                {"urls": ["stun:stun.cloudflare.com:3478"]},
-            ],
-            "iceCandidatePoolSize": 10,
-        },
+        audio_receiver_size=1024,
+        media_stream_constraints={"audio": True, "video": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         audio_processor_factory=ContinuousAudioProcessor,
         async_processing=True,
     )
     
-    # Check connection status
-    if continuous_ctx.state.playing:
-        st.success("🎤 Connected! Speak naturally...")
-    elif continuous_ctx.state.signalling:
-        st.info("🔄 Connecting to audio stream...")
-    else:
-        st.warning("⚠️ Audio not connected. Click 'START' above.")
-    
-    # Alternative: Manual trigger for testing
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🧪 Test Continuous Mode", use_container_width=True):
-            if continuous_ctx.audio_processor:
-                audio_data = continuous_ctx.audio_processor.get_audio_data()
-                if audio_data is not None:
-                    process_continuous_speech(audio_data, ai_provider, video_ctx, status_placeholder)
-                else:
-                    st.warning("No audio captured. Try speaking louder or longer.")
-    with col2:
-        if st.button("🔄 Reset Connection", use_container_width=True):
-            st.rerun()
-    
-    # Process pending speech automatically (with better error handling)
+    # Process pending speech automatically
     if (st.session_state['pending_speech'] is not None and 
         not st.session_state['is_processing'] and
         st.session_state['openai_api_key'] and
-        st.session_state['anthropic_api_key'] and
-        continuous_ctx.state.playing):
+        st.session_state['anthropic_api_key']):
         
-        try:
-            st.session_state['is_processing'] = True
-            status_placeholder.warning("🤖 Processing your message...")
-            
-            # Process the speech
-            process_continuous_speech(
-                st.session_state['pending_speech'], 
-                ai_provider, 
-                video_ctx,
-                status_placeholder
-            )
-            
-        except Exception as e:
-            st.error(f"Processing error: {str(e)}")
-        finally:
-            # Clear the pending speech and reset
-            st.session_state['pending_speech'] = None
-            st.session_state['is_processing'] = False
-            status_placeholder.success("🎤 Ready for next message...")
-            time.sleep(1)  # Brief pause before refreshing
-            st.rerun()
+        st.session_state['is_processing'] = True
+        status_placeholder.warning("🤖 Processing your message...")
+        
+        # Process the speech
+        process_continuous_speech(
+            st.session_state['pending_speech'], 
+            ai_provider, 
+            video_ctx,
+            status_placeholder
+        )
+        
+        # Clear the pending speech
+        st.session_state['pending_speech'] = None
+        st.session_state['is_processing'] = False
+        
+        # Refresh the page to continue listening
+        st.rerun()
 
 def process_continuous_speech(audio_data, ai_provider, video_ctx, status_placeholder):
     """Process speech in continuous mode"""
@@ -478,32 +429,18 @@ def process_continuous_speech(audio_data, ai_provider, video_ctx, status_placeho
         status_placeholder.success("🎤 Listening... speak naturally!")
 
 # Manual conversation mode (original functionality)
-if not (ai_provider == "Anthropic" and 'continuous_mode' in locals() and continuous_mode):
+else:
     st.subheader("🎙️ Manual Voice Recording")
     st.info("💡 Click buttons to record and process your voice messages")
-    
-    # Live Recording (for manual mode or non-Anthropic)
+
+# Live Recording (for manual mode or non-Anthropic)
+if not (ai_provider == "Anthropic" and 'continuous_mode' in locals() and continuous_mode):
     ctx = webrtc_streamer(
         key="audio_recorder",
         mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=1024,
-        media_stream_constraints={
-            "audio": {
-                "echoCancellation": True,
-                "noiseSuppression": True,
-                "autoGainControl": True
-            }, 
-            "video": False
-        },
-        rtc_configuration={
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]},
-                {"urls": ["stun:stun.cloudflare.com:3478"]},
-            ],
-            "iceCandidatePoolSize": 10,
-        },
+        audio_receiver_size=256,
+        media_stream_constraints={"audio": True, "video": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         audio_processor_factory=AudioProcessor,
         async_processing=True,
     )
@@ -835,34 +772,10 @@ st.sidebar.markdown("""
 
 st.sidebar.header("🔧 Troubleshooting")
 st.sidebar.markdown("""
-- **Connection issues**: Try refreshing the page
-- **"Taking longer than expected"**: 
-  - Check microphone permissions in browser
-  - Try using Chrome or Edge browser
-  - Disable VPN if using one
-- **No audio detected**: Check microphone permissions and speak louder
+- **No audio detected**: Check microphone permissions
 - **API errors**: Verify your API keys are correct
-- **Continuous mode not working**: Try manual test button first
+- **Recording issues**: Try file upload instead
 - **Browser compatibility**: Use Chrome/Edge for best results
-""")
-
-st.sidebar.header("🌐 Connection Tips")
-st.sidebar.markdown("""
-- **Microphone Access**: Allow microphone permissions when prompted
-- **Browser Support**: Chrome and Edge work best
-- **Network**: Stable internet connection required
-- **Firewall**: Some corporate firewalls block WebRTC
-- **VPN**: May interfere with audio streaming
-- **HTTPS**: Ensure you're using HTTPS (not HTTP)
-""")
-
-st.sidebar.header("🎙️ Audio Quality Tips")
-st.sidebar.markdown("""
-- **Speak clearly** and at normal volume
-- **Minimize background noise**
-- **Wait for processing** to complete before speaking again
-- **Check microphone** is working in other apps first
-- **Use headphones** to avoid echo/feedback
 """)
 
 st.sidebar.header("🔒 Privacy & Security")
