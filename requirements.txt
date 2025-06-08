@@ -1,6 +1,8 @@
 streamlit
-openai>=1.0.0
-anthropic>=0.25.0
-requests
+streamlit-webrtc
+openai
+anthropic
+av
+pillow
 numpy
-Pillow
+requests
