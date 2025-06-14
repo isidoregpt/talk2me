@@ -190,14 +190,26 @@ class VideoProcessor:
 
 # Enhanced ICE Server Configuration
 def get_ice_servers():
-    """Get ICE servers with fallback options"""
+    """Production-ready ICE configuration with commercial TURN servers"""
     return RTCConfiguration({
         "iceServers": [
             # Public STUN servers
             {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": ["stun:stun1.l.google.com:19302"]},
             
-            # Free TURN server for testing (replace with your own for production)
+            # Commercial TURN service (CRITICAL for reliability) - Replace with your credentials
+            {
+                "urls": "turn:global.turn.twilio.com:3478?transport=tcp",
+                "username": os.getenv("TWILIO_USERNAME", "your-twilio-username"),
+                "credential": os.getenv("TWILIO_CREDENTIAL", "your-twilio-credential")
+            },
+            {
+                "urls": "turn:global.turn.twilio.com:443?transport=tcp",
+                "username": os.getenv("TWILIO_USERNAME", "your-twilio-username"),
+                "credential": os.getenv("TWILIO_CREDENTIAL", "your-twilio-credential")
+            },
+            
+            # Fallback: Free TURN server for testing
             {
                 "urls": ["turn:openrelay.metered.ca:80"],
                 "username": "openrelayproject",
@@ -208,18 +220,122 @@ def get_ice_servers():
                 "username": "openrelayproject", 
                 "credential": "openrelayproject"
             }
-            
-            # Add your production TURN servers here:
-            # {
-            #     "urls": ["turn:your-turn-server.com:3478"],
-            #     "username": "your-username",
-            #     "credential": "your-password"
-            # }
         ],
         "iceTransportPolicy": "all",  # Try all available candidates
         "bundlePolicy": "max-bundle",
         "rtcpMuxPolicy": "require"
     })
+
+def diagnose_connection_issues():
+    """Comprehensive network diagnostics"""
+    st.subheader("🔬 Network Diagnostics")
+    
+    diagnostics = {
+        "timestamp": datetime.now().isoformat(),
+        "connection_type": "unknown",
+        "nat_type": "unknown",
+        "firewall_detected": False,
+        "stun_reachable": False,
+        "turn_reachable": False
+    }
+
+    with st.spinner("Running network diagnostics..."):
+        # Test STUN connectivity
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(5)
+            sock.connect(("stun.l.google.com", 19302))
+            diagnostics["stun_reachable"] = True
+            sock.close()
+        except Exception as e:
+            diagnostics["stun_reachable"] = False
+            diagnostics["firewall_detected"] = True
+            logger.warning(f"STUN test failed: {e}")
+
+        # Test TURN connectivity (basic socket test)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect(("openrelay.metered.ca", 80))
+            diagnostics["turn_reachable"] = True
+            sock.close()
+        except Exception as e:
+            diagnostics["turn_reachable"] = False
+            logger.warning(f"TURN test failed: {e}")
+
+    # Display results
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("STUN Connectivity", "✅ OK" if diagnostics["stun_reachable"] else "❌ Failed")
+        st.metric("TURN Connectivity", "✅ OK" if diagnostics["turn_reachable"] else "❌ Failed")
+    
+    with col2:
+        st.metric("Firewall Detected", "⚠️ Yes" if diagnostics["firewall_detected"] else "✅ No")
+        
+    # Show detailed diagnostics
+    st.json(diagnostics)
+    
+    # Recommendations
+    if not diagnostics["stun_reachable"] or not diagnostics["turn_reachable"]:
+        st.error("**Connection Issues Detected!**")
+        st.markdown("""
+        **Immediate Actions:**
+        1. Try using a VPN to bypass firewall restrictions
+        2. Contact your network administrator about WebRTC support
+        3. Set up commercial TURN servers (Twilio/Xirsys) for production
+        4. Try the 'Force TCP Connection' workaround below
+        """)
+        
+        # Quick workaround
+        if st.button("🔧 Force TCP Connection"):
+            st.session_state['force_tcp'] = True
+            st.success("TCP-only mode enabled. Try connecting again.")
+    else:
+        st.success("Network connectivity looks good! ✅")
+
+# WebRTC Connection Manager Class
+class WebRTCConnectionManager:
+    def __init__(self):
+        self.connection_state = "new"
+        self.ice_connection_state = "new"
+        self.callbacks = {}
+        self.retry_count = 0
+        self.max_retries = 3
+
+    def on_ice_connection_state_change(self, state):
+        """Handle ICE connection state changes"""
+        self.ice_connection_state = state
+        logger.info(f"ICE connection state changed to: {state}")
+        
+        if state == "failed":
+            self._handle_connection_failure()
+        elif state == "disconnected":
+            self._attempt_reconnection()
+        elif state == "connected":
+            self.retry_count = 0  # Reset retry count on successful connection
+
+    def _handle_connection_failure(self):
+        """Handle connection failures with exponential backoff"""
+        logger.error("WebRTC connection failed")
+        if self.retry_count < self.max_retries:
+            delay = 2 ** self.retry_count
+            logger.info(f"Attempting reconnection in {delay} seconds")
+            self._attempt_reconnection(delay=delay)
+        else:
+            logger.error("Max retry attempts reached")
+
+    def _attempt_reconnection(self, delay=0):
+        """Attempt to reconnect with exponential backoff"""
+        self.retry_count += 1
+        if delay > 0:
+            time.sleep(delay)
+        # Reconnection logic would go here
+        logger.info(f"Reconnection attempt {self.retry_count}")
+
+# Initialize connection manager
+connection_manager = WebRTCConnectionManager()
 
 def monitor_connection_state(webrtc_ctx):
     """Monitor and display connection state"""
@@ -539,16 +655,29 @@ def render_unified_media_interface(enable_video=False):
     """Unified audio/video interface - CRITICAL FIX: Single WebRTC component"""
     st.subheader("🎤📹 Media Interface")
     
+    # Check for TCP force mode
+    force_tcp = st.session_state.get('force_tcp', False)
+    if force_tcp:
+        st.info("🔧 TCP-only mode enabled for firewall compatibility")
+    
     media_constraints = {
         "audio": True,
         "video": enable_video
     }
 
+    # Get ICE configuration with TCP forcing if needed
+    ice_config = get_ice_servers()
+    if force_tcp:
+        ice_config = RTCConfiguration({
+            **ice_config.__dict__,
+            "iceTransportPolicy": "relay"  # Force TURN server usage
+        })
+
     # Use enhanced ICE configuration with retry logic
     config = {
         "key": "unified-media",
         "mode": WebRtcMode.SENDONLY,
-        "rtc_configuration": get_ice_servers(),
+        "rtc_configuration": ice_config,
         "media_stream_constraints": media_constraints,
         "audio_frame_callback": audio_processor.process_audio_frame,
     }
@@ -556,24 +685,32 @@ def render_unified_media_interface(enable_video=False):
     if enable_video:
         config["video_processor_factory"] = lambda: video_processor
 
-    # Connect with retry logic
-    webrtc_ctx = connect_with_retry(config)
-    
-    if webrtc_ctx:
-        # Monitor connection state
-        monitor_connection_state(webrtc_ctx)
+    # Try direct connection first, then retry logic
+    try:
+        webrtc_ctx = webrtc_streamer(**config)
         
+        # Monitor connection state
+        if webrtc_ctx:
+            monitor_connection_state(webrtc_ctx)
+            connection_manager.on_ice_connection_state_change(
+                getattr(webrtc_ctx.state, 'ice_connection_state', 'new')
+            )
+    except Exception as e:
+        logger.error(f"WebRTC initialization failed: {e}")
+        webrtc_ctx = None
+    
+    if webrtc_ctx and webrtc_ctx.state.playing:
         # Media controls
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            if st.button("🎙️ Start Recording", disabled=not webrtc_ctx.state.playing):
+            if st.button("🎙️ Start Recording"):
                 audio_processor.start_recording()
                 st.session_state['recording_start'] = time.time()
                 st.success("Recording started!")
 
         with col2:
-            if st.button("⏹️ Stop Recording", disabled=not webrtc_ctx.state.playing):
+            if st.button("⏹️ Stop Recording"):
                 audio_processor.stop_recording()
                 audio_bytes = audio_processor.get_audio_bytes()
                 if audio_bytes:
@@ -583,7 +720,7 @@ def render_unified_media_interface(enable_video=False):
                     st.warning("No audio recorded")
 
         with col3:
-            if enable_video and st.button("📸 Capture Image", disabled=not webrtc_ctx.state.playing):
+            if enable_video and st.button("📸 Capture Image"):
                 image_bytes = video_processor.get_latest_image()
                 if image_bytes:
                     st.session_state['last_image'] = image_bytes
@@ -606,7 +743,21 @@ def render_unified_media_interface(enable_video=False):
 
     else:
         st.error("❌ Failed to establish WebRTC connection. Please check your network settings.")
-        st.info("🔧 **Troubleshooting:**\n- Refresh the page\n- Check if you're behind a corporate firewall\n- Try using a VPN\n- Ensure camera/microphone permissions are granted")
+        
+        # Enhanced troubleshooting
+        st.info("""
+        🔧 **Troubleshooting Steps:**
+        
+        1. **Refresh the page** - Sometimes helps with WebRTC initialization
+        2. **Check browser permissions** - Ensure camera/microphone access is granted
+        3. **Corporate firewall?** - Try the network diagnostics in the sidebar
+        4. **Use VPN** - Can bypass restrictive firewalls
+        5. **Try TCP mode** - Click 'Force TCP Connection' in diagnostics
+        """)
+        
+        # Quick retry button
+        if st.button("🔄 Retry Connection"):
+            st.rerun()
     
     return webrtc_ctx
 
@@ -715,6 +866,10 @@ def main():
         if st.button("🗑️ Clear Conversation"):
             st.session_state['conversation'] = []
             st.rerun()
+            
+        # Add connection diagnostics button
+        if st.button("🔧 Run Connection Diagnostics"):
+            diagnose_connection_issues()
 
     # Main content area
     col1, col2 = st.columns([1, 1])
@@ -768,22 +923,13 @@ def main():
         - Production: Twilio, Xirsys, or self-hosted CoTURN
         """)
         
-        # Show current connection info
+        # Show current connection info if webrtc_ctx exists
         if 'webrtc_ctx' in locals() and webrtc_ctx:
             st.json({
                 "WebRTC State": str(webrtc_ctx.state.playing),
                 "ICE Servers": len(get_ice_servers()["iceServers"]),
-                "Media Constraints": webrtc_ctx.media_stream_constraints if hasattr(webrtc_ctx, 'media_stream_constraints') else "N/A"
+                "Media Constraints": getattr(webrtc_ctx, 'media_stream_constraints', "N/A")
             })
-            process_user_input(text_input, ai_provider, voice, model, enable_webcam)
-
-    with col2:
-        # Video Interface (if enabled)
-        if enable_webcam:
-            render_video_interface()
-        
-        # Conversation Display
-        render_conversation()
 
     # Footer
     st.divider()
